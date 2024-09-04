@@ -1,0 +1,4 @@
+- source: main.qmd
+  quarto-pub:
+    - id: 8aa93e90-f3da-4f77-a0e8-db871119c6ba
+      url: 'https://maxdrohde.quarto.pub/how-to-use-accre-for-statistical-simulations'

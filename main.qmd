@@ -1,0 +1,363 @@
+---
+title: "How to use ACCRE for statistical simulations"
+code-annotations: select
+---
+
+```{r}
+#| echo: false
+library(gt)
+library(tidyverse)
+```
+
+::: {.callout-note}
+## Code on GitHub
+
+All the code referenced in this document can be found at the GitHub repository here: <https://github.com/maxdrohde/accre_tutorial>
+:::
+
+::: {.callout-warning}
+## There are many ways to use ACCRE
+
+This is just my personal method for running jobs on ACCRE. I don't claim that it is the best way, but it has worked very well for my needs. It took me a long time to figure this stuff how, so I hope that sharing can help others get started on ACCRE faster! 
+:::
+
+
+# Get an ACCRE account
+
+You will need to request an account on ACCRE before you can use the computing cluster. The information to start the process can be found here: <https://www.vanderbilt.edu/accre/getting-started/>.
+
+Some preliminary concepts to know:
+
+- ACCRE is a computing cluster, which means that it has many computer cores to run code.
+- You will want to use ACCRE if your simulation has many scenarios that can run independently of each other.
+- Users with an ACCRE account submit jobs to be run on ACCRE using a software called SLURM.
+- You should know the basics of using a UNIX command line and the `bash` terminal (here's a good introduction: <https://youtu.be/uwAqEzhyjtw?si=Epqf9ol4w9kpvbOP>)
+- Make sure you have taken the required ACCRE training: <https://www.vanderbilt.edu/accre/required-training/>
+
+Running code on ACCRE may be a bit different than how you would run it on a laptop, but the benefits can be great -- it can speed up your simulations by 500x or more!
+
+# Design your simulation function
+
+The first step to designing a simulation study is to put your simulation code into an R function. The simulation function should do the following things:
+
+1) Take as function arguments the complete set of parameters you need to define a given simulation setting
+2) Run the simulation $N$ times, where $N$ is determined by how much accuracy you need, and how much time / computing power you have
+3) Write out the results from that simulation setting to a file (e.g., CSV, [Parquet](https://r4ds.hadley.nz/arrow#sec-parquet), plain text)
+
+::: {.callout-warning}
+## `results` folder
+
+We will be storing our results to a folder called `results`, so make sure this folder exists and is empty before running your simulation.
+:::
+
+As a simple example, we will define a simulation function to compute the power of the [t-test](https://en.wikipedia.org/wiki/Student%27s_t-test) for a given scenario defined by the following parameters:
+
+- Sample size of each group: `n1` and `n2`
+- Mean of each group: `mu1` and `mu2`
+- SD of each group: `sd1` and `sd2`
+- The number of simulations to run when estimating power: `n_sim`
+
+I have included detailed comments to explain each part of the function.
+
+::: {.callout-note}
+## `glue()`
+If you haven't seen the `glue()` function before, it's a useful tool to create strings using R code, which we use to create unique file names to store the results of each simulation run. You can read more about it here: <https://glue.tidyverse.org/>.
+:::
+
+```{r}
+run_t_test <- function(mu1,
+                       mu2,
+                       sd1,
+                       sd2,
+                       n1,
+                       n2,
+                       n_sim){
+  
+  # Take all the arguments passed into the function
+  # and save them as a named list, so that we can
+  # append it later as metadata
+  arguments <- c(as.list(environment()))
+  
+  # Create an empty vector for the p values
+  # with length equal to the number of simulation replicates
+  p <- numeric(n_sim)
+  
+  
+  for (i in 1:n_sim) {
+      # Create the data for each group
+      y1 <- rnorm(n = n1, mean = mu1, sd = sd1)
+      y2 <- rnorm(n = n2, mean = mu2, sd = sd2)
+      # Run the t.test, extract the p value, and store it
+      p[i] <- t.test(y1, y2)$p.value
+  }
+  
+  # Calculate the power using alpha = 0.05
+  power <- mean(p < 0.05)
+  
+  # Store the power into a data.frame and append
+  # the arguments as metadata to identify which simulation it came from
+  results <- data.frame(power, arguments)
+  
+  # Append the datetime to the output
+  results$datetime <- Sys.time()
+  
+  # Create the filename for the output CSV file with
+  # 1) the values of the arguments, and
+  # 2) the current datetime as an integer
+  arguments_string <- paste(arguments, collapse = '_')
+  datetime <- as.integer(Sys.time())
+  filename <- glue::glue("{arguments_string}_{datetime}.csv")
+  
+  # Write out the CSV file to the results folder
+  readr::write_csv(x = results, file = glue::glue("results/{filename}"))
+}
+```
+
+Here's an example of the file that is produced when we run the following simulation setting:
+
+```r
+run_t_test(1,1,1,1,5,5,10)
+```
+
+::: {.callout-note}
+
+## `results/1_1_1_1_5_5_10_1725481507.csv`
+
+```
+power,mu1,mu2,sd1,sd2,n1,n2,n_sim,datetime
+0.1,1,1,1,1,5,5,10,2024-09-04T20:25:07Z
+```
+:::
+
+# Define which parameters to use
+
+We need to define the collection of parameters that define our simulation scenarios. The `expand.grid()` function is useful for this. We input a collection of vectors for each parameter, and `expand.grid()` returns a data.frame with all the unique combinations as the rows.
+
+```{r}
+sim_settings <-
+  expand.grid(mu1 = 0,
+              mu2 = c(0,1,2,3),
+              sd1 = c(1,2,3),
+              sd2 = c(1,2,3),
+              n1 = seq(10, 50, 10),
+              n2 = seq(10, 50, 10))
+```
+
+```{r}
+#| echo: false
+sim_settings |>
+  gt() |>
+  opt_interactive(use_compact_mode = TRUE) |>
+  opt_stylize(style = 2)
+```
+
+# Put your code into a `.R` script
+
+Now that we have all of our simulation settings defined, we need to put the code into an R script. Let's name the script `sim_script.R`. We need to create the R script so that when we call it from the command line with `Rscript`, we are able to select which simulation setting to use.
+
+For example, on the command line we could call `Rscript sim_script.R 10` to run the simulation corresponding to the 10th row of the `sim_settings` data.frame defined above. The code to do this is shown in the first lines of the below script.
+
+```{r}
+#| eval: false
+# Read in the arguments from the command line
+args <- commandArgs(trailingOnly=TRUE)
+# Take the first argument only
+i <- as.integer(args[[1]])
+
+# Set the seed based on the current job number
+# This is important for reproducibility and ensuring that each simulation
+# starts with a different random seed
+set.seed(i)
+
+# Define simulation settings
+sim_settings <-
+  expand.grid(mu1 = 0,
+              mu2 = c(0,1,2,3),
+              sd1 = c(1,2,3),
+              sd2 = c(1,2,3),
+              n1 = seq(10, 50, 10),
+              n2 = seq(10, 50, 10))
+
+# Select the simulation setting for this run
+# by taking the ith row of `sim_settings`
+params <- sim_settings[i,]
+
+# Define main simulation function
+run_t_test <- function(mu1, mu2, sd1, sd2, n1, n2, n_sim){
+  
+  arguments <- c(as.list(environment()))
+  
+  p <- numeric(n_sim)
+  
+  for (i in 1:n_sim) {
+      y1 <- rnorm(n = n1, mean = mu1, sd = sd1)
+      y2 <- rnorm(n = n2, mean = mu2, sd = sd2)
+      p[i] <- t.test(y1, y2)$p.value
+  }
+  power <- mean(p < 0.05)
+  
+  results <- data.frame(power, arguments)
+  results$datetime <- Sys.time()
+  
+  arguments_string <- paste(arguments, collapse = '_')
+  datetime <- as.integer(Sys.time())
+  filename <- glue::glue("{arguments_string}_{datetime}.csv")
+  
+  readr::write_csv(x = results, file = glue::glue("results/{filename}"))
+}
+
+# Run the simulation 1e4 times with the specified parameters
+run_t_test(mu1 = params$mu1,
+           mu2 = params$mu2,
+           sd1 = params$sd1,
+           sd2 = params$sd2,
+           n1 = params$n1,
+           n2 = params$n2,
+           n_sim = 1e4)
+```
+
+# Create the SLURM script
+
+To submit the job to ACCRE, you need to create a SLURM script. I call my SLURM scripts `submit.slurm`.
+
+Here's an example with explanations. Click on the numbers at the end of each line to see how to interpret that command.
+
+```bash
+#!/bin/bash
+
+# User Details
+#SBATCH --mail-user=maximilian.d.rohde@vanderbilt.edu # <1>
+#SBATCH --mail-type=ALL                               # <2>
+
+# Compute details
+#SBATCH --partition=production   # <3>
+#SBATCH --nodes=1                # <4>
+#SBATCH --ntasks=1               # <4>
+#SBATCH --cpus-per-task=1        # <4>
+#SBATCH --time=5:00:00           # <5>
+#SBATCH --mem=5G                 # <6>  
+
+# Name of output file
+#SBATCH --output=status_reports/out-%A-%a.out   # <7>
+
+# Number of jobs in SLURM job array
+#SBATCH --array=1-900                           # <8>
+
+# Load R
+module load GCC/11.3.0 OpenMPI/4.1.4 R/4.2.1    # <9>
+
+# Run R script
+Rscript --no-save run_slurm.R $SLURM_ARRAY_TASK_ID    # <10>
+```
+1. Which email should be used to send notifications?
+2. Which notifications would you like to receive? `ALL` sends notifications for job start, end, and failure.
+3. Run the job on the main production cluster. You can also set this to `debug` to run small test jobs.
+4. Run each job submitted with one processing core. You can change this if you designed each run of the simulation setting to use multiple cores, but we didn't do this here.
+5. Run each job for a maximum of 5 hours. It will be canceled after this. I recommend testing how long code takes to run on your laptop, and then tripling it.
+6. Request 5G of memory per job. You can raise or lower depending on how memory intensive your simulation is.
+7. Write the terminal output from each job to a `.out` file in the `status_reports` folder. This can be helpful for debugging errors.
+8. Set the number of jobs you are submitting. You should change this based on the number of rows in your `expand.grid` data frame.
+9. Load R into ACCRE.
+10. Run your R script. A different simulation scenario runs for each job based on `$SLURM_ARRAY_TASK_ID`, which was defined in step 8.
+
+ACCRE has a complex algorithm for choosing which order to run jobs, but when requesting a job, you should ask for as little time and memory as you need, in order to make it more likely for your job to run sooner.
+
+# Submit the SLURM job
+
+Now we need to submit the job to ACCRE. Upload the folder with your R script and SLURM script to ACCRE. You can do this using the interactive portal here: <https://portal.accre.vanderbilt.edu/pun/sys/dashboard/files/>. If you use GitHub, you could also put your files into a GitHub repository and then call `git clone MY_REPO_URL` from the terminal in ACCRE.
+
+![Uploading files using the ACCRE portal. You can also use `ssh`.](portal.png)
+
+Now we have our R script and our SLURM script uploaded to ACCRE.
+
+![R script and SLURM script on ACCRE](portal2.png)
+
+We can now `ssh` into ACCRE, navigate into our folder, and submit the job to the SLURM cluster. See the following screenshot for details.
+
+![Submitting the job to ACCRE](accre.png)
+
+You can run the following command to see the status of your jobs:
+
+```
+> [rohdemd@gw381 t_test_sim]$ qSummary -g h_biostat_student
+
+
+GROUP        USER                  ACTIVE_JOBS  ACTIVE_CORES  PENDING_JOBS  PENDING_CORES
+-----------------------------------------------------------------------------------------
+h_biostat_student                    500          500           744           744
+            -----                    497          497             0             0
+            rohdemd                    0            0           744           744
+            -----                      3            3             0             0
+-----------------------------------------------------------------------------------------
+```
+
+# Merge the files
+
+Now that we ran the simulation, we have 900 CSV files of results, one for each simulation run. We can create a script called `process_results.R` to merge the CSV files together. 
+
+```{r}
+#| eval: false
+# Create a character vector of all the CSV filepaths from the ./results directory
+paths <- fs::dir_ls(path = "./results",
+                    glob = "*.csv")
+
+# Read in the CSV file for each filepath
+# then merge them all into one data frame
+df <-
+  purrr::map(paths,
+      ~data.table::fread(.x),
+      .progress = TRUE) |>
+  data.table::rbindlist()
+
+# Write the final results to CSV
+readr::write_csv(df, file = "sim_results.csv")
+```
+
+I usually run this on the terminal in ACCRE so that I only have to download one CSV file to analyze the results.
+
+For example:
+
+```bash
+> [rohdemd@gw381 t_test_sim]$ module load GCC/11.3.0 OpenMPI/4.1.4 R/4.2.1
+> [rohdemd@gw381 t_test_sim]$ Rscript process_results.R
+```
+
+# Analyze your data
+
+Now that you have your simulation results all in one file, you can start to analyze the results! I download the results CSV file to my local computer and read it in:
+
+```{r}
+results <- readr::read_csv("sim_results.csv")
+```
+
+Then we can display the results and make some nice plots!
+
+```{r}
+#| echo: false
+results |>
+  gt() |>
+  opt_interactive(use_compact_mode = TRUE) |>
+  opt_stylize(style = 2)
+```
+
+```{r}
+# Plot simulation results
+results |>
+  filter(mu1==0, mu2 == 1) |>
+  mutate(n2 = as.factor(n2)) |>
+  ggplot() +
+  aes(x = n1, y = power, color = n2, group = n2) +
+  geom_line() +
+  facet_grid(sd1 ~sd2) +
+  theme_bw() +
+  labs(title = "T-test power simulation",
+       subtitle = "Rows: SD1\nColumns: SD2",
+       x = "N1", y = "Estimated Power", color = "N2")
+```
+
+# Some helpful tips
+
+- **Always  run a small job first to see your code works!**. You don't want to use up a lot of computing time for a job that fails or has bugs.
+- Submit jobs in advance of when you need them. You never know if there will be a long wait on ACCRE.
+- Optimize your code before using ACCRE. If you write more efficient R code (or even try C++ with the `Rcpp` package), you might be able to run the simulations you need on your personal computer.
+
